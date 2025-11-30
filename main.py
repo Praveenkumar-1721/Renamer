@@ -17,10 +17,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL")) 
 OWNER_ID = int(os.environ.get("OWNER_ID"))
-# Variable name changed to match HF style better, but RENDER_URL works too
 RENDER_URL = os.environ.get("RENDER_URL") 
-# ⚠️ CHANGE: Port 7860 for Hugging Face
 PORT = int(os.environ.get("PORT", 7860))
+
+# --- MEMORY ---
+RENAME_QUEUE = {}
 
 # --- DESIGN SETTINGS ---
 LOGO_URL = "https://i.ibb.co/dJrBFKMF/logo.jpg" 
@@ -33,15 +34,22 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP ---
-bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50)
+# --- BOT SETUP (FIXED CONNECTION) ---
+bot = Client(
+    "RenamerBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workers=50,
+    in_memory=True # ⚠️ FIX: Prevents Disk Permission Errors
+)
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ Hugging Face Engine Active!")
+async def home(request): return web.Response(text="⚡️ Hugging Face Bot Running!")
 
-# --- HTML PAGE ---
+# --- HTML TEMPLATE ---
 def get_download_page(display_name, file_size, download_link):
     return f"""
     <!DOCTYPE html>
@@ -172,10 +180,12 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "keep-alive"
+            "Connection": "close"
         }
 
         response = web.StreamResponse(status=resp_status, headers=headers)
+        if hasattr(response, 'force_close'):
+            response.force_close()
         await response.prepare(request)
 
         try:
@@ -201,33 +211,44 @@ async def start(c, m):
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(client, message):
     if message.from_user.id != OWNER_ID: return
-    # Reuse Renamer Queue logic from previous steps... 
-    # Just keeping it simple for the migration example
-    # ... Assume same logic as before ...
-    # BUT, make sure to add Queue Logic here if not already present
-    # Simplified for brevity:
+    RENAME_QUEUE[message.from_user.id] = message
     file = getattr(message, message.media.value)
     filename = getattr(file, "file_name", "file.mp4")
     await message.reply_text(f"📂 `{filename}`\n👇 **Type New Name:**", reply_markup=ForceReply(True))
 
-@bot.on_message(filters.reply & filters.private)
+@bot.on_message(filters.text & filters.private & ~filters.command("start"))
 async def rename_handler(client, message):
     if message.from_user.id != OWNER_ID: return
-    reply = message.reply_to_message
-    if not reply or not reply.media: return
+    if message.from_user.id not in RENAME_QUEUE: return
 
+    original_msg = RENAME_QUEUE[message.from_user.id]
     new_name = message.text.strip()
-    if "." not in new_name: new_name += ".mkv"
-    
+    if "." not in new_name:
+        try:
+            ext = getattr(original_msg, original_msg.media.value).file_name.split(".")[-1]
+            new_name = f"{new_name}.{ext}"
+        except: new_name = f"{new_name}.mkv"
+
     status = await message.reply_text("⚡️ **Processing...**")
+
     try:
-        log = await reply.copy(BIN_CHANNEL)
-        media = getattr(reply, reply.media.value)
+        log = await original_msg.copy(BIN_CHANNEL)
+        media = getattr(original_msg, original_msg.media.value)
         import secrets
         h = secrets.token_urlsafe(8)
-        await collection.insert_one({"media_id": h, "msg_id": log.id, "file_size": getattr(media, "file_size", 0), "custom_name": new_name, "caption": new_name})
+        
+        await collection.insert_one({
+            "media_id": h,
+            "msg_id": log.id,
+            "file_size": getattr(media, "file_size", 0),
+            "custom_name": new_name,
+            "caption": new_name 
+        })
+
         d_link = f"{RENDER_URL}/view/{h}"
         await status.edit_text(f"✅ **Renamed!**\n📥 `{d_link}`")
+        del RENAME_QUEUE[message.from_user.id]
+
     except Exception as e:
         await status.edit_text(f"❌ Error: {e}")
 
