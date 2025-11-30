@@ -20,8 +20,8 @@ OWNER_ID = int(os.environ.get("OWNER_ID"))
 RENDER_URL = os.environ.get("RENDER_URL") 
 PORT = int(os.environ.get("PORT", 8080))
 
-# --- MEMORY ---
-RENAME_QUEUE = {}
+# --- MEMORY STORAGE (The Fix) ---
+RENAME_QUEUE = {} # Temporary Memory to store file info
 
 # --- DATABASE ---
 db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
@@ -32,7 +32,7 @@ collection = db["files"]
 bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=10)
 routes = web.RouteTableDef()
 
-# --- SERVER ---
+# --- SERVER ENGINE ---
 @routes.get("/")
 async def home(request): return web.Response(text="⚡️ Renamer Engine Running!")
 
@@ -44,16 +44,10 @@ async def download_file(request):
         if not data: return web.Response(text="❌ Link Expired", status=404)
 
         try:
-            # TRY-CATCH FOR CHANNEL CONNECTION
-            try:
-                msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
-            except:
-                # Force Refresh Peer
-                await bot.get_chat(BIN_CHANNEL)
-                msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
+            msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
             media = getattr(msg, msg.media.value)
         except:
-            return web.Response(text="File Missing or Bot removed from Channel", status=404)
+            return web.Response(text="File Missing", status=404)
 
         file_size = getattr(media, "file_size", 0)
         final_filename = data.get("custom_name", getattr(media, "file_name", "file.mp4"))
@@ -86,38 +80,50 @@ async def download_file(request):
 # --- BOT COMMANDS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start(c, m): 
-    await m.reply_text("👋 **4GB Renamer Bot Ready!**\nSend me a file.")
+    await m.reply_text("👋 **4GB Renamer Bot Ready!**\nSend me a file to start.")
 
+# 1. FILE HANDLER (Store in Memory)
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(client, message):
     if message.from_user.id != OWNER_ID: return
+    
+    # ⚠️ TRICK: Save the file message in Memory Dictionary
     RENAME_QUEUE[message.from_user.id] = message
+    
     file = getattr(message, message.media.value)
     original_name = getattr(file, "file_name", "file.mp4")
+    
     await message.reply_text(
-        f"📂 **Original:** `{original_name}`\n\n👇 **Type New Name:**",
+        f"📂 **Original:** `{original_name}`\n\n"
+        "👇 **Type New Name below:**\n"
+        "_(Example: Leo Movie Tamil.mkv)_",
         reply_markup=ForceReply(True)
     )
 
+# 2. RENAME LOGIC (Use Memory)
 @bot.on_message(filters.text & filters.private & ~filters.command("start"))
 async def rename_handler(client, message):
     if message.from_user.id != OWNER_ID: return
+    
+    # ⚠️ TRICK: Get the file from Memory
     if message.from_user.id not in RENAME_QUEUE:
-        await message.reply_text("❌ Session Expired. Send file again.")
+        await message.reply_text("❌ **Session Expired!**\nPlease send the file again.")
         return
 
     original_msg = RENAME_QUEUE[message.from_user.id]
     new_name = message.text
+    
+    # Validation
     if "." not in new_name:
         try:
-            ext = getattr(original_msg, original_msg.media.value).file_name.split(".")[-1]
-            new_name = f"{new_name}.{ext}"
-        except: new_name = f"{new_name}.mkv"
+            original_ext = getattr(original_msg, original_msg.media.value).file_name.split(".")[-1]
+            new_name = f"{new_name}.{original_ext}"
+        except:
+            new_name = f"{new_name}.mkv"
 
     status = await message.reply_text("⚡️ **Processing...**")
 
     try:
-        # Copy to Bin Channel
         log = await original_msg.copy(BIN_CHANNEL)
         media = getattr(original_msg, original_msg.media.value)
         
@@ -132,25 +138,26 @@ async def rename_handler(client, message):
         })
 
         d_link = f"{RENDER_URL}/download/{h}"
-        await status.edit_text(f"✅ **Renamed!**\n📥 **Link:**\n`{d_link}`")
+
+        await status.edit_text(
+            f"✅ **Renamed!**\n\n"
+            f"📝 **Name:** `{new_name}`\n"
+            f"📥 **Link:**\n`{d_link}`\n\n"
+            f"⚠️ _Click link to download with new name!_",
+            disable_web_page_preview=True
+        )
+        
+        # Clear Memory
         del RENAME_QUEUE[message.from_user.id]
 
     except Exception as e:
         await status.edit_text(f"Error: {e}")
 
-# --- START SERVICE (THE MAIN FIX) ---
+# --- START SERVICE ---
 async def start_services():
-    print("🤖 Starting Bot...")
     await bot.start()
-    
-    # ⚠️ FORCE CONNECT TO BIN CHANNEL
-    try:
-        print("🔄 Checking Bin Channel...")
-        await bot.get_chat(BIN_CHANNEL)
-        print("✅ Bin Channel Found!")
-    except Exception as e:
-        print(f"❌ Error: Bot is NOT Admin in Bin Channel! {e}")
-
+    try: await bot.get_chat(BIN_CHANNEL)
+    except: pass
     app = web.Application()
     app.add_routes(routes)
     runner = web.AppRunner(app)
