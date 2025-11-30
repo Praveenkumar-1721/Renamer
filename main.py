@@ -11,21 +11,18 @@ import motor.motor_asyncio
 from pyrogram.file_id import FileId
 
 # --- CONFIGURATION ---
-# Errors varaama irukka defaults vechurukken
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-MONGO_URL = os.environ.get("MONGO_URL", "")
-BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL", 0)) 
-OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-RENDER_URL = os.environ.get("RENDER_URL", "") 
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+MONGO_URL = os.environ.get("MONGO_URL")
+BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL")) 
+OWNER_ID = int(os.environ.get("OWNER_ID"))
+RENDER_URL = os.environ.get("RENDER_URL") 
 PORT = int(os.environ.get("PORT", 8080))
 
-# --- DESIGN SETTINGS ---
-LOGO_URL = "https://i.ibb.co/dJrBFKMF/logo.jpg" 
-BACKGROUND_IMG = "https://wallpaperaccess.com/full/1567665.png"
-CHANNEL_LINK = "https://t.me/cinemxtic_univerz"
-ADMIN_BOT_LINK = "https://t.me/Cinemxtic_univerz_admin_bot"
+# --- MEMORY QUEUE (THE FIX) ---
+# Idhu dhaan un file-a nyabagam vechukum
+RENAME_QUEUE = {} 
 
 # --- DATABASE ---
 db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
@@ -36,9 +33,9 @@ collection = db["files"]
 bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=10)
 routes = web.RouteTableDef()
 
-# --- SERVER ---
+# --- SERVER ENGINE ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ Bot is Alive!")
+async def home(request): return web.Response(text="⚡️ Bot Running!")
 
 @routes.get("/download/{hash}")
 async def download_file(request):
@@ -55,7 +52,7 @@ async def download_file(request):
                 msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
             media = getattr(msg, msg.media.value)
         except:
-            return web.Response(text="File Missing (Check Admin Rights)", status=404)
+            return web.Response(text="File Missing", status=404)
 
         file_size = getattr(media, "file_size", 0)
         final_filename = data.get("custom_name", getattr(media, "file_name", "file.mp4"))
@@ -88,71 +85,88 @@ async def download_file(request):
 # --- BOT COMMANDS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start(c, m): 
-    await m.reply_text("👋 **Renamer Bot Ready!**")
+    await m.reply_text("👋 **4GB Renamer Ready!**\nSend me a file.")
 
+# 1. FILE HANDLER (Store in Memory)
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(client, message):
     if message.from_user.id != OWNER_ID: return
-    # Direct Process (No Queue for safety)
+    
+    # Save File in Queue
+    RENAME_QUEUE[message.from_user.id] = message
+    
     file = getattr(message, message.media.value)
     filename = getattr(file, "file_name", "file.mp4")
-    await message.reply_text(f"📂 `{filename}`\n👇 **Type New Name:**", reply_markup=ForceReply(True))
+    
+    await message.reply_text(
+        f"📂 **Original:** `{filename}`\n\n"
+        "👇 **Type New Name below:**",
+        reply_markup=ForceReply(True)
+    )
 
-@bot.on_message(filters.reply & filters.private)
+# 2. RENAME HANDLER (Fix: Removed Media Check)
+@bot.on_message(filters.text & filters.private & ~filters.command("start"))
 async def rename_handler(client, message):
     if message.from_user.id != OWNER_ID: return
-    reply = message.reply_to_message
-    if not reply or not reply.media: return
-
-    new_name = message.text
-    if "." not in new_name: new_name += ".mkv"
     
+    # Check if user has a file in queue
+    if message.from_user.id not in RENAME_QUEUE:
+        # Ignore random texts if no file is pending
+        return 
+
+    # Get the original file from Memory
+    original_msg = RENAME_QUEUE[message.from_user.id]
+    new_name = message.text.strip()
+    
+    # Auto Extension Logic
+    if "." not in new_name:
+        try:
+            media = getattr(original_msg, original_msg.media.value)
+            ext = getattr(media, "file_name", "").split(".")[-1]
+            if ext: new_name += f".{ext}"
+        except:
+            new_name += ".mkv"
+
     status = await message.reply_text("⚡️ **Processing...**")
+
     try:
-        log = await reply.copy(BIN_CHANNEL)
+        log = await original_msg.copy(BIN_CHANNEL)
+        media = getattr(original_msg, original_msg.media.value)
+        
         import secrets
         h = secrets.token_urlsafe(8)
-        await collection.insert_one({"media_id": h, "msg_id": log.id, "custom_name": new_name})
+        
+        await collection.insert_one({
+            "media_id": h,
+            "msg_id": log.id,
+            "file_size": getattr(media, "file_size", 0),
+            "custom_name": new_name 
+        })
+
         d_link = f"{RENDER_URL}/download/{h}"
-        await status.edit_text(f"✅ **Renamed!**\n📥 `{d_link}`")
+        await status.edit_text(f"✅ **Renamed!**\n📝 `{new_name}`\n📥 **Link:**\n`{d_link}`")
+        
+        # Clear Memory
+        del RENAME_QUEUE[message.from_user.id]
+
     except Exception as e:
         await status.edit_text(f"❌ Error: {e}")
 
-# --- SAFE STARTUP SEQUENCE ---
+# --- START SERVICE ---
 async def start_services():
-    print("⏳ Initializing Server...")
-    
-    # 1. Start Web Server FIRST (To satisfy Render)
+    print("🤖 Starting Bot...")
+    await bot.start()
+    try: await bot.get_chat(BIN_CHANNEL)
+    except: pass
     app = web.Application()
     app.add_routes(routes)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print("✅ Web Server Started on Port 8080")
-
-    # 2. Start Bot SECOND
-    print("🤖 Starting Telegram Bot...")
-    try:
-        await bot.start()
-        print("✅ Bot Started Successfully")
-    except Exception as e:
-        print(f"⚠️ BOT START ERROR: {e}")
-        # Server will keep running so we can see logs
-        await idle()
-        return
-
-    # 3. Check Channel
-    try:
-        print("Checking Bin Channel...")
-        await bot.get_chat(BIN_CHANNEL)
-        print("✅ Bin Channel Connected")
-    except Exception as e:
-        print(f"⚠️ CHANNEL ERROR: {e} (Make sure Bot is Admin)")
-
-    print("🚀 System Online")
     await idle()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_services())
+            
