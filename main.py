@@ -40,8 +40,7 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=50,
-    in_memory=True # ⚠️ FIX: Prevents Disk Permission Errors
+    workers=50
 )
 routes = web.RouteTableDef()
 
