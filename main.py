@@ -34,16 +34,16 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP (INCREASED WORKERS TO 300) ---
-# Idhu dhaan main fix. 300 aalunga velai seivaanga. So Waiting eh irukkadhu.
-bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=300, max_concurrent_transmissions=100)
+# --- BOT SETUP (OPTIMIZED WORKERS) ---
+# 50 Workers is the sweet spot for Render Free Tier (Speed + Stability)
+bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50)
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ High-Performance Renamer Active!")
+async def home(request): return web.Response(text="⚡️ Jet-Speed Engine Active!")
 
-# --- HTML PAGE ---
+# --- HTML TEMPLATE ---
 def get_download_page(display_name, file_size, download_link):
     return f"""
     <!DOCTYPE html>
@@ -108,7 +108,7 @@ def get_download_page(display_name, file_size, download_link):
                 </div>
             </div>
             <script>
-                // 10ms Redirect (Super Fast)
+                // Instant Auto-Redirect (10ms)
                 setTimeout(function() {{ window.location.href = "{download_link}"; }}, 10); 
             </script>
         </div>
@@ -129,13 +129,13 @@ async def view_file(request):
             if size < 1024: break
             size /= 1024
         readable_size = f"{size:.2f} {unit}"
-        display_name = data.get("custom_name", data.get("file_name"))
+        display_name = data.get("caption", data['file_name'])
 
         return web.Response(text=get_download_page(display_name, readable_size, download_url), content_type='text/html')
     except:
         return web.Response(text="Error")
 
-# --- THE DOWNLOAD ENGINE (NO WAIT LOGIC) ---
+# --- THE SPEED ENGINE (LOW LATENCY) ---
 @routes.get("/download/{hash}")
 async def download_file(request):
     try:
@@ -144,14 +144,16 @@ async def download_file(request):
         if not data: return web.Response(text="File Not Found", status=404)
 
         try:
-            try:
-                msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
-            except:
-                await bot.get_chat(BIN_CHANNEL)
-                msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
+            msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
             media = getattr(msg, msg.media.value)
         except:
-            return web.Response(text="File Missing", status=404)
+            # Try once more with connect
+            try:
+                await bot.get_chat(BIN_CHANNEL)
+                msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
+                media = getattr(msg, msg.media.value)
+            except:
+                return web.Response(text="File Missing", status=404)
 
         file_size = data['file_size']
         file_name = data.get("custom_name", getattr(media, "file_name", "file.mp4"))
@@ -175,24 +177,23 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "close" # FORCE CLOSE TO PREVENT LAG
+            "Connection": "keep-alive" # ⚠️ SPEED TRICK: Keep Alive for faster reconnect
         }
 
         response = web.StreamResponse(status=resp_status, headers=headers)
-        
-        # ⚠️ CRITICAL FIX: FORCE CLOSE UNDERLYING SOCKET IF DISCONNECTED
-        response.force_close() 
         await response.prepare(request)
 
         try:
             async for chunk in bot.stream_media(message=msg, limit=0, offset=offset):
+                # Only check disconnect, DO NOT clean RAM inside loop (CPU Saver)
                 if request.transport and request.transport.is_closing():
-                    break # KILL INSTANTLY
+                    break 
                 await response.write(chunk)
         except: pass
         finally:
             await response.write_eof()
-            gc.collect()
+            # Clean RAM only AFTER download finishes/cancels
+            gc.collect() 
             
         return response
 
@@ -237,7 +238,8 @@ async def rename_handler(client, message):
             "media_id": h,
             "msg_id": log.id,
             "file_size": getattr(media, "file_size", 0),
-            "custom_name": new_name 
+            "custom_name": new_name,
+            "caption": new_name # Save caption as new name
         })
 
         d_link = f"{RENDER_URL}/view/{h}"
