@@ -2,5 +2,4 @@ pyrogram
 tgcrypto
 motor
 aiohttp
-uvloop
 dnspython
