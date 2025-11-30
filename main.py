@@ -4,15 +4,11 @@ import math
 import asyncio
 import logging
 import gc
-import uvloop # ⚠️ THE SPEED MAGIC
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiohttp import web
 import motor.motor_asyncio
 from pyrogram.file_id import FileId
-
-# --- ACTIVATE FAST ENGINE ---
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -23,6 +19,9 @@ BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL"))
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 RENDER_URL = os.environ.get("RENDER_URL") 
 PORT = int(os.environ.get("PORT", 8080))
+
+# --- MEMORY ---
+RENAME_QUEUE = {}
 
 # --- DESIGN SETTINGS ---
 LOGO_URL = "https://i.ibb.co/dJrBFKMF/logo.jpg" 
@@ -35,20 +34,13 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP (NO UPDATES = FASTER) ---
-bot = Client(
-    "RenamerBot", 
-    api_id=API_ID, 
-    api_hash=API_HASH, 
-    bot_token=BOT_TOKEN, 
-    workers=100, 
-    no_updates=True # ⚠️ TRICK: Don't waste time reading chat updates
-)
+# --- BOT SETUP ---
+bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50)
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ UVLOOP Engine Active!")
+async def home(request): return web.Response(text="⚡️ Stable Bot Running!")
 
 # --- HTML TEMPLATE ---
 def get_download_page(display_name, file_size, download_link):
@@ -135,13 +127,13 @@ async def view_file(request):
             if size < 1024: break
             size /= 1024
         readable_size = f"{size:.2f} {unit}"
-        display_name = data.get("custom_name", data.get("file_name"))
+        display_name = data.get("caption", data['file_name'])
 
         return web.Response(text=get_download_page(display_name, readable_size, download_url), content_type='text/html')
     except:
         return web.Response(text="Error")
 
-# --- THE DOWNLOAD ENGINE (OPTIMIZED) ---
+# --- DOWNLOAD ENGINE ---
 @routes.get("/download/{hash}")
 async def download_file(request):
     try:
@@ -181,14 +173,18 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "keep-alive"
+            "Connection": "close"
         }
 
         response = web.StreamResponse(status=resp_status, headers=headers)
+        
+        # ⚠️ CRITICAL: Ensure instant kill on disconnect
+        if hasattr(response, 'force_close'):
+            response.force_close()
+            
         await response.prepare(request)
 
         try:
-            # ⚠️ SPEED TRICK: 1MB Chunks + UVLOOP Engine
             async for chunk in bot.stream_media(message=msg, limit=0, offset=offset):
                 if request.transport and request.transport.is_closing():
                     break 
@@ -206,34 +202,34 @@ async def download_file(request):
 # --- BOT COMMANDS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start(c, m): 
-    await m.reply_text("👋 **Renamer Bot Ready!**\nSend me a file.")
+    await m.reply_text("👋 **Bot Ready!**\nSend me a file.")
 
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(client, message):
     if message.from_user.id != OWNER_ID: return
-    # Direct Process - No Queue (Faster)
+    RENAME_QUEUE[message.from_user.id] = message
     file = getattr(message, message.media.value)
     filename = getattr(file, "file_name", "file.mp4")
     await message.reply_text(f"📂 `{filename}`\n👇 **Type New Name:**", reply_markup=ForceReply(True))
 
-@bot.on_message(filters.reply & filters.private)
+@bot.on_message(filters.text & filters.private & ~filters.command("start"))
 async def rename_handler(client, message):
     if message.from_user.id != OWNER_ID: return
-    reply = message.reply_to_message
-    if not reply or not reply.media: return
+    if message.from_user.id not in RENAME_QUEUE: return
 
+    original_msg = RENAME_QUEUE[message.from_user.id]
     new_name = message.text.strip()
     if "." not in new_name:
         try:
-            ext = getattr(reply, reply.media.value).file_name.split(".")[-1]
+            ext = getattr(original_msg, original_msg.media.value).file_name.split(".")[-1]
             new_name = f"{new_name}.{ext}"
-        except: new_name += ".mkv"
+        except: new_name = f"{new_name}.mkv"
 
     status = await message.reply_text("⚡️ **Processing...**")
 
     try:
-        log = await reply.copy(BIN_CHANNEL)
-        media = getattr(reply, reply.media.value)
+        log = await original_msg.copy(BIN_CHANNEL)
+        media = getattr(original_msg, original_msg.media.value)
         import secrets
         h = secrets.token_urlsafe(8)
         
@@ -247,6 +243,7 @@ async def rename_handler(client, message):
 
         d_link = f"{RENDER_URL}/view/{h}"
         await status.edit_text(f"✅ **Renamed!**\n📥 `{d_link}`")
+        del RENAME_QUEUE[message.from_user.id]
 
     except Exception as e:
         await status.edit_text(f"❌ Error: {e}")
@@ -266,8 +263,6 @@ async def start_services():
     await idle()
 
 if __name__ == "__main__":
-    # ⚠️ UVLOOP POLICY ACTIVATION
-    uvloop.install()
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_services())
     
