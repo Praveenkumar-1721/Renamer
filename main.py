@@ -4,6 +4,7 @@ import math
 import asyncio
 import logging
 import gc
+import traceback # Error kandupidikka
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiohttp import web
@@ -11,16 +12,16 @@ import motor.motor_asyncio
 from pyrogram.file_id import FileId
 
 # --- CONFIGURATION ---
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URL = os.environ.get("MONGO_URL")
-BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL")) 
-OWNER_ID = int(os.environ.get("OWNER_ID"))
-RENDER_URL = os.environ.get("RENDER_URL") 
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+MONGO_URL = os.environ.get("MONGO_URL", "")
+BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL", 0)) 
+OWNER_ID = int(os.environ.get("OWNER_ID", 0))
+RENDER_URL = os.environ.get("RENDER_URL", "") 
 PORT = int(os.environ.get("PORT", 8080))
 
-# --- MEMORY QUEUE ---
+# --- MEMORY ---
 RENAME_QUEUE = {}
 
 # --- DESIGN SETTINGS ---
@@ -34,14 +35,13 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP (OPTIMIZED WORKERS) ---
-# 50 Workers is the sweet spot for Render Free Tier (Speed + Stability)
+# --- BOT SETUP ---
 bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50)
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ Jet-Speed Engine Active!")
+async def home(request): return web.Response(text="⚡️ Debug Bot Active!")
 
 # --- HTML TEMPLATE ---
 def get_download_page(display_name, file_size, download_link):
@@ -108,7 +108,6 @@ def get_download_page(display_name, file_size, download_link):
                 </div>
             </div>
             <script>
-                // Instant Auto-Redirect (10ms)
                 setTimeout(function() {{ window.location.href = "{download_link}"; }}, 10); 
             </script>
         </div>
@@ -121,7 +120,7 @@ async def view_file(request):
     try:
         hash_id = request.match_info['hash']
         data = await collection.find_one({"media_id": hash_id})
-        if not data: return web.Response(text="❌ File Not Found.", status=404)
+        if not data: return web.Response(text="❌ File Not Found (DB Error)", status=404)
 
         download_url = f"{RENDER_URL}/download/{hash_id}"
         size = data['file_size']
@@ -129,13 +128,15 @@ async def view_file(request):
             if size < 1024: break
             size /= 1024
         readable_size = f"{size:.2f} {unit}"
-        display_name = data.get("caption", data['file_name'])
+        display_name = data.get("custom_name", data.get("file_name"))
 
         return web.Response(text=get_download_page(display_name, readable_size, download_url), content_type='text/html')
-    except:
-        return web.Response(text="Error")
+    except Exception as e:
+        # ⚠️ DEBUG MODE: Printing Error to Screen
+        error_trace = traceback.format_exc()
+        return web.Response(text=f"⚠️ ERROR DETECTED:\n\n{e}\n\n{error_trace}")
 
-# --- THE SPEED ENGINE (LOW LATENCY) ---
+# --- THE DOWNLOAD ENGINE ---
 @routes.get("/download/{hash}")
 async def download_file(request):
     try:
@@ -144,16 +145,14 @@ async def download_file(request):
         if not data: return web.Response(text="File Not Found", status=404)
 
         try:
-            msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
-            media = getattr(msg, msg.media.value)
-        except:
-            # Try once more with connect
             try:
+                msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
+            except:
                 await bot.get_chat(BIN_CHANNEL)
                 msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
-                media = getattr(msg, msg.media.value)
-            except:
-                return web.Response(text="File Missing", status=404)
+            media = getattr(msg, msg.media.value)
+        except:
+            return web.Response(text="File Missing in Channel", status=404)
 
         file_size = data['file_size']
         file_name = data.get("custom_name", getattr(media, "file_name", "file.mp4"))
@@ -177,33 +176,32 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "keep-alive" # ⚠️ SPEED TRICK: Keep Alive for faster reconnect
+            "Connection": "close"
         }
 
         response = web.StreamResponse(status=resp_status, headers=headers)
+        response.force_close()
         await response.prepare(request)
 
         try:
             async for chunk in bot.stream_media(message=msg, limit=0, offset=offset):
-                # Only check disconnect, DO NOT clean RAM inside loop (CPU Saver)
                 if request.transport and request.transport.is_closing():
                     break 
                 await response.write(chunk)
         except: pass
         finally:
             await response.write_eof()
-            # Clean RAM only AFTER download finishes/cancels
-            gc.collect() 
+            gc.collect()
             
         return response
 
     except Exception as e:
-        return web.Response(text=f"Error: {e}")
+        return web.Response(text=f"Stream Error: {e}")
 
 # --- BOT COMMANDS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start(c, m): 
-    await m.reply_text("👋 **4GB Renamer Ready!**\nSend me a file.")
+    await m.reply_text("👋 **Bot Ready!**\nSend me a file.")
 
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(client, message):
@@ -239,11 +237,11 @@ async def rename_handler(client, message):
             "msg_id": log.id,
             "file_size": getattr(media, "file_size", 0),
             "custom_name": new_name,
-            "caption": new_name # Save caption as new name
+            "caption": new_name 
         })
 
         d_link = f"{RENDER_URL}/view/{h}"
-        await status.edit_text(f"✅ **Renamed!**\n📝 `{new_name}`\n📥 **Link:**\n`{d_link}`")
+        await status.edit_text(f"✅ **Renamed!**\n📥 `{d_link}`")
         del RENAME_QUEUE[message.from_user.id]
 
     except Exception as e:
