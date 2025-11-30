@@ -138,19 +138,20 @@ async def rename_handler(client, message):
     except Exception as e:
         await status.edit_text(f"Error: {e}")
 
-# --- START SERVICE (THE MAIN FIX) ---
+# --- START SERVICE (FORCE CONNECT FIX) ---
 async def start_services():
     print("🤖 Starting Bot...")
     await bot.start()
     
-    # ⚠️ FORCE CONNECT TO BIN CHANNEL
+    # ⚠️ FORCE WAKE UP: Send a message to Bin Channel
     try:
-        print("🔄 Checking Bin Channel...")
-        await bot.get_chat(BIN_CHANNEL)
-        print("✅ Bin Channel Found!")
+        print("🔄 Connecting to Bin Channel...")
+        await bot.send_message(BIN_CHANNEL, "🤖 **Bot Started Successfully!**\nConnection Established.")
+        print("✅ Bin Channel Connected & Cached!")
     except Exception as e:
-        print(f"❌ Error: Bot is NOT Admin in Bin Channel! {e}")
+        print(f"❌ Error: Bot cannot message Bin Channel! Make sure it is Admin.\nError: {e}")
 
+    print("🌍 Starting Web Server...")
     app = web.Application()
     app.add_routes(routes)
     runner = web.AppRunner(app)
@@ -158,8 +159,3 @@ async def start_services():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     await idle()
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_services())
-    
