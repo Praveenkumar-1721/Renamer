@@ -4,5 +4,3 @@ motor
 aiohttp
 uvloop
 dnspython
-hachoir
-pillow
