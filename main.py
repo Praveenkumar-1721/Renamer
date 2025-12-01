@@ -3,12 +3,10 @@ import time
 import math
 import asyncio
 import logging
-import gc
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiohttp import web
 import motor.motor_asyncio
-from pyrogram.file_id import FileId
 
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -18,7 +16,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL")) 
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 RENDER_URL = os.environ.get("RENDER_URL") 
-PORT = int(os.environ.get("PORT", 7860))
+PORT = int(os.environ.get("PORT", 8080))
 
 # --- MEMORY ---
 RENAME_QUEUE = {}
@@ -34,21 +32,16 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP (FIXED CONNECTION) ---
-bot = Client(
-    "RenamerBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=50
-)
+# --- BOT SETUP ---
+# workers=50 is best for Render Free Tier
+bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=50, in_memory=True)
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ Hugging Face Bot Running!")
+async def home(request): return web.Response(text="⚡️ Rocket Engine Active!")
 
-# --- HTML TEMPLATE ---
+# --- HTML TEMPLATE (Cinematic Design) ---
 def get_download_page(display_name, file_size, download_link):
     return f"""
     <!DOCTYPE html>
@@ -113,7 +106,8 @@ def get_download_page(display_name, file_size, download_link):
                 </div>
             </div>
             <script>
-                setTimeout(function() {{ window.location.href = "{download_link}"; }}, 10); 
+                // Instant Auto-Redirect
+                setTimeout(function() {{ window.location.href = "{download_link}"; }}, 100); 
             </script>
         </div>
     </body>
@@ -139,7 +133,7 @@ async def view_file(request):
     except:
         return web.Response(text="Error")
 
-# --- DOWNLOAD ENGINE ---
+# --- THE SPEED STREAMER (Optimized) ---
 @routes.get("/download/{hash}")
 async def download_file(request):
     try:
@@ -179,24 +173,20 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "close"
+            "Connection": "keep-alive" # Faster Resumes
         }
 
         response = web.StreamResponse(status=resp_status, headers=headers)
-        if hasattr(response, 'force_close'):
-            response.force_close()
         await response.prepare(request)
 
+        # ⚠️ THE STREAMING CORE (NO GC IN LOOP = MAX SPEED)
         try:
             async for chunk in bot.stream_media(message=msg, limit=0, offset=offset):
                 if request.transport and request.transport.is_closing():
                     break 
                 await response.write(chunk)
         except: pass
-        finally:
-            await response.write_eof()
-            gc.collect()
-            
+        
         return response
 
     except Exception as e:
@@ -226,7 +216,7 @@ async def rename_handler(client, message):
         try:
             ext = getattr(original_msg, original_msg.media.value).file_name.split(".")[-1]
             new_name = f"{new_name}.{ext}"
-        except: new_name = f"{new_name}.mkv"
+        except: new_name += ".mkv"
 
     status = await message.reply_text("⚡️ **Processing...**")
 
