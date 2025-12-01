@@ -8,7 +8,6 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiohttp import web
 import motor.motor_asyncio
-from pyrogram.file_id import FileId
 
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -20,7 +19,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID"))
 RENDER_URL = os.environ.get("RENDER_URL") 
 PORT = int(os.environ.get("PORT", 8080))
 
-# --- MEMORY QUEUE ---
+# --- MEMORY ---
 RENAME_QUEUE = {}
 
 # --- DESIGN SETTINGS ---
@@ -34,14 +33,20 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP (LIGHT WEIGHT MODE) ---
-# Workers decreased to 4 to prevent Render CPU Choking (Faster response)
-bot = Client("RenamerBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4, max_concurrent_transmissions=4)
+# --- BOT SETUP (IPV6 DISABLED FOR SPEED) ---
+bot = Client(
+    "RenamerBot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN, 
+    workers=100, 
+    ipv6=False # ⚠️ TRICK: IPv4 is faster on Render
+)
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ Cheat-Code Engine Active!")
+async def home(request): return web.Response(text="⚡️ Black Magic Engine!")
 
 # --- HTML TEMPLATE ---
 def get_download_page(display_name, file_size, download_link):
@@ -108,8 +113,8 @@ def get_download_page(display_name, file_size, download_link):
                 </div>
             </div>
             <script>
-                // 0ms Redirect (Instant)
-                window.location.href = "{download_link}";
+                // 0ms Redirect
+                setTimeout(function() {{ window.location.href = "{download_link}"; }}, 0); 
             </script>
         </div>
     </body>
@@ -135,19 +140,21 @@ async def view_file(request):
     except:
         return web.Response(text="Error")
 
-# --- THE DOWNLOAD ENGINE (CHEAT START) ---
+# --- THE BLACK MAGIC DOWNLOADER ---
 @routes.get("/download/{hash}")
 async def download_file(request):
     try:
         hash_id = request.match_info['hash']
-        # 1. Fetch Details from DB (Very Fast)
         data = await collection.find_one({"media_id": hash_id})
-        if not data: return web.Response(text="File Not Found", status=404)
+        if not data: return web.Response(text="Link Expired", status=404)
 
-        file_size = data['file_size']
-        file_name = data.get("custom_name", data.get("file_name"))
+        # ⚠️ CHEAT 1: NO FILE CHECKING (Saves 1 second)
+        # We assume file exists and go straight to stream
         
-        # Range handling for Resume Support
+        file_size = data['file_size']
+        file_name = data.get("custom_name", "video.mp4")
+        
+        # Range handling
         offset = 0
         length = file_size
         range_header = request.headers.get("Range")
@@ -167,18 +174,16 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "close"
+            "Connection": "close" # ⚠️ CHEAT 2: Force Close for 2nd time speed
         }
 
-        # ⚠️ TRICK: Send Headers IMMEDIATELY (Don't wait for Telegram)
         response = web.StreamResponse(status=resp_status, headers=headers)
         if hasattr(response, 'force_close'): response.force_close()
         await response.prepare(request)
 
-        # 2. NOW Connect to Telegram (Behind the scenes)
         try:
-            # We skip checking if file exists in channel to save time.
-            # We trust the DB. If it fails later, stream breaks, but download starts instantly.
+            # ⚠️ CHEAT 3: Direct Stream without Safety Nets
+            # We get message ONLY when needed
             msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
             
             async for chunk in bot.stream_media(message=msg, limit=0, offset=offset):
@@ -188,7 +193,7 @@ async def download_file(request):
         except: pass
         finally:
             await response.write_eof()
-            gc.collect()
+            gc.collect() # Immediate Cleanup
             
         return response
 
@@ -234,8 +239,7 @@ async def rename_handler(client, message):
             "msg_id": log.id,
             "file_size": getattr(media, "file_size", 0),
             "custom_name": new_name,
-            "caption": new_name,
-            "file_name": getattr(media, "file_name", "file.mp4") # Store fallback name
+            "caption": new_name 
         })
 
         d_link = f"{RENDER_URL}/view/{h}"
