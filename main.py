@@ -3,11 +3,12 @@ import time
 import math
 import asyncio
 import logging
-import gc
+# gc (Garbage Collector) is REMOVED for Raw Speed
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from aiohttp import web
 import motor.motor_asyncio
+from pyrogram.file_id import FileId
 
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID"))
@@ -18,9 +19,6 @@ BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL"))
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 RENDER_URL = os.environ.get("RENDER_URL") 
 PORT = int(os.environ.get("PORT", 8080))
-
-# --- MEMORY ---
-RENAME_QUEUE = {}
 
 # --- DESIGN SETTINGS ---
 LOGO_URL = "https://i.ibb.co/dJrBFKMF/logo.jpg" 
@@ -33,20 +31,23 @@ db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = db_client["RenamerBotDB"]
 collection = db["files"]
 
-# --- BOT SETUP (IPV6 DISABLED FOR SPEED) ---
+# --- BOT SETUP (HACK MODE) ---
+# workers=200: Aggressive threading
+# no_updates=True: Ignore all other telegram messages for speed
 bot = Client(
     "RenamerBot", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN, 
-    workers=100, 
-    ipv6=False # ⚠️ TRICK: IPv4 is faster on Render
+    workers=200, 
+    no_updates=True,
+    ipv6=False 
 )
 routes = web.RouteTableDef()
 
 # --- SERVER ---
 @routes.get("/")
-async def home(request): return web.Response(text="⚡️ Black Magic Engine!")
+async def home(request): return web.Response(text="⚡️ Dark Engine Running!")
 
 # --- HTML TEMPLATE ---
 def get_download_page(display_name, file_size, download_link):
@@ -113,8 +114,8 @@ def get_download_page(display_name, file_size, download_link):
                 </div>
             </div>
             <script>
-                // 0ms Redirect
-                setTimeout(function() {{ window.location.href = "{download_link}"; }}, 0); 
+                // 0ms Redirect - Instant Trigger
+                window.location.replace("{download_link}");
             </script>
         </div>
     </body>
@@ -140,21 +141,21 @@ async def view_file(request):
     except:
         return web.Response(text="Error")
 
-# --- THE BLACK MAGIC DOWNLOADER ---
+# --- THE "HACK" DOWNLOADER ---
 @routes.get("/download/{hash}")
 async def download_file(request):
     try:
         hash_id = request.match_info['hash']
         data = await collection.find_one({"media_id": hash_id})
-        if not data: return web.Response(text="Link Expired", status=404)
+        if not data: return web.Response(text="Error", status=404)
 
-        # ⚠️ CHEAT 1: NO FILE CHECKING (Saves 1 second)
-        # We assume file exists and go straight to stream
-        
+        # ⚠️ HACK 1: SKIP FILE CHECKING (Assume it exists)
+        # We don't call 'get_messages' here to save time. 
+        # We call it inside the stream loop only.
+
         file_size = data['file_size']
         file_name = data.get("custom_name", "video.mp4")
         
-        # Range handling
         offset = 0
         length = file_size
         range_header = request.headers.get("Range")
@@ -174,27 +175,25 @@ async def download_file(request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {offset}-{offset + length - 1}/{file_size}",
             "Content-Length": str(length),
-            "Connection": "close" # ⚠️ CHEAT 2: Force Close for 2nd time speed
+            "Connection": "close"
         }
 
+        # ⚠️ HACK 2: SEND HEADERS INSTANTLY (Fake Start)
         response = web.StreamResponse(status=resp_status, headers=headers)
-        if hasattr(response, 'force_close'): response.force_close()
         await response.prepare(request)
 
+        # ⚠️ HACK 3: TINY CHUNKS FOR INSTANT START (64KB)
+        # 64KB is small enough to travel fast, big enough to buffer
         try:
-            # ⚠️ CHEAT 3: Direct Stream without Safety Nets
-            # We get message ONLY when needed
             msg = await bot.get_messages(BIN_CHANNEL, data['msg_id'])
             
-            async for chunk in bot.stream_media(message=msg, limit=0, offset=offset):
+            async for chunk in bot.stream_media(message=msg, limit=0, offset=offset, chunk_size=1024*64):
                 if request.transport and request.transport.is_closing():
                     break 
                 await response.write(chunk)
         except: pass
-        finally:
-            await response.write_eof()
-            gc.collect() # Immediate Cleanup
-            
+        
+        # ⚠️ HACK 4: NO CLEANUP (Let Python handle it, save CPU time)
         return response
 
     except Exception as e:
@@ -203,7 +202,7 @@ async def download_file(request):
 # --- BOT COMMANDS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start(c, m): 
-    await m.reply_text("👋 **Bot Ready!**\nSend me a file.")
+    await m.reply_text("👋 **Hacked Speed Bot Ready!**")
 
 @bot.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def handle_file(client, message):
